@@ -1,9 +1,9 @@
 import sys
 from typing import Optional
+import json
 
 import numpy as np
 import pandas as pd
-import json
 
 from sensor.configuration.mongo_db_connection import MongoDBClient
 from sensor.constant.database import DATABASE_NAME
@@ -16,9 +16,7 @@ class SensorData:
     """
 
     def __init__(self):
-
         try:
-
             self.mongo_client = MongoDBClient(
                 database_name=DATABASE_NAME
             )
@@ -32,8 +30,14 @@ class SensorData:
         collection_name: str,
         database_name: Optional[str] = None
     ):
+        """
+        Read CSV file and insert its records into MongoDB.
+        """
 
         try:
+            # ======================================
+            # READ CSV
+            # ======================================
 
             data_frame = pd.read_csv(file_path)
 
@@ -42,6 +46,10 @@ class SensorData:
                 inplace=True
             )
 
+            # ======================================
+            # CONVERT DATAFRAME TO RECORDS
+            # ======================================
+
             records = list(
                 json.loads(
                     data_frame.T.to_json()
@@ -49,11 +57,10 @@ class SensorData:
             )
 
             # ======================================
-            # DATABASE
+            # GET MONGODB COLLECTION
             # ======================================
 
             if database_name is None:
-
                 collection = (
                     self.mongo_client.database[
                         collection_name
@@ -61,7 +68,6 @@ class SensorData:
                 )
 
             else:
-
                 collection = (
                     self.mongo_client.client[
                         database_name
@@ -70,12 +76,21 @@ class SensorData:
                     ]
                 )
 
-            collection.insert_many(records)
+            # ======================================
+            # INSERT RECORDS
+            # ======================================
+
+            if records:
+                collection.insert_many(records)
+
+            print(
+                f"Successfully inserted {len(records)} "
+                f"records into MongoDB"
+            )
 
             return len(records)
 
         except Exception as e:
-
             raise SensorException(e, sys)
 
     def export_collection_as_dataframe(
@@ -83,15 +98,16 @@ class SensorData:
         collection_name: str,
         database_name: Optional[str] = None
     ) -> pd.DataFrame:
+        """
+        Export MongoDB collection as pandas DataFrame.
+        """
 
         try:
-
             # ======================================
-            # DATABASE
+            # GET MONGODB COLLECTION
             # ======================================
 
             if database_name is None:
-
                 collection = (
                     self.mongo_client.database[
                         collection_name
@@ -99,7 +115,6 @@ class SensorData:
                 )
 
             else:
-
                 collection = (
                     self.mongo_client.client[
                         database_name
@@ -121,24 +136,23 @@ class SensorData:
             # ======================================
 
             if df.shape[0] == 0:
-
-                print("No data found in MongoDB collection")
-
+                print(
+                    "No data found in MongoDB collection"
+                )
                 return pd.DataFrame()
 
             # ======================================
-            # DROP _id
+            # DROP MONGODB _id
             # ======================================
 
             if "_id" in df.columns:
-
                 df.drop(
                     columns=["_id"],
                     inplace=True
                 )
 
             # ======================================
-            # REPLACE na
+            # REPLACE "na" WITH NaN
             # ======================================
 
             df.replace(
@@ -147,10 +161,11 @@ class SensorData:
                 inplace=True
             )
 
-            print(f"DataFrame Shape: {df.shape}")
+            print(
+                f"DataFrame Shape: {df.shape}"
+            )
 
             return df
 
         except Exception as e:
-
             raise SensorException(e, sys)

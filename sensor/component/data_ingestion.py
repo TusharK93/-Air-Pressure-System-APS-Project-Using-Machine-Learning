@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 
 from sklearn.model_selection import train_test_split
-
+from pathlib import Path
 from sensor.entity import config_entity
 from sensor.entity import artifact_entity
 
@@ -136,7 +136,8 @@ class DataIngestion:
             # IMPORT CSV INTO MONGODB EVERY TIME
             # --------------------------------------------------
 
-            csv_path = r"C:\Users\tukum\PYthonvscode\MLproject\aps_failure_training_set1.csv"
+            project_root = Path(__file__).resolve().parents[2]
+            csv_path = project_root / "aps_failure_training_set1.csv"
 
             print(f"Reading CSV: {csv_path}")
 
