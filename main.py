@@ -1,23 +1,17 @@
 import os
 import sys
-import webbrowser
-import threading
 import pandas as pd
+import numpy as np
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse
-import numpy as np
 
 from sensor.constant.training_pipeline import (
     SAVED_MODEL_DIR,
     SCHEMA_FILE_PATH
 )
-from uvicorn import run as app_run
-
-from sensor.logger import logging
-from sensor.exception import SensorException
 
 from sensor.pipeline.training_pipeline import TrainPipeline
 
@@ -26,35 +20,35 @@ from sensor.utils.main_utils import (
     load_object
 )
 
-from sensor.constant.training_pipeline import (
-    SAVED_MODEL_DIR,
-    SCHEMA_FILE_PATH
-)
-
-from sensor.constant.application import APP_HOST, APP_PORT
+from sensor.constant.application import APP_PORT
 
 from sensor.ml.model.estimator import (
     ModelResolver,
     TargetValueMapping
 )
 
+from sensor.logger import logging
+
+
 # =========================================================
-# ENV FILE
+# ENVIRONMENT VARIABLE
 # =========================================================
 
-env_file_path = os.path.join(os.getcwd(), "env.yaml")
+# Render should provide MONGO_DB_URL from Environment Variables.
+# Do NOT depend on env.yaml in production.
+
+if os.getenv("MONGO_DB_URL") is None:
+    print("WARNING: MONGO_DB_URL environment variable is NOT SET")
+else:
+    print("MONGO_DB_URL is available")
 
 
-def set_env_variable(env_file_path):
-    try:
-        if os.getenv("MONGO_DB_URL") is None:
-            env_config = read_yaml_file(file_path=env_file_path)
-            os.environ["MONGO_DB_URL"] = env_config["MONGO_DB_URL"]
-    except Exception as e:
-        raise SensorException(e, sys)
-
+# =========================================================
+# FASTAPI APPLICATION
+# =========================================================
 
 app = FastAPI()
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,110 +59,264 @@ app.add_middleware(
 )
 
 
+# =========================================================
+# HOME
+# =========================================================
+
 @app.get("/")
-async def index():
+def index():
     return RedirectResponse(url="/docs")
 
 
+# =========================================================
+# TRAIN
+# =========================================================
+
 @app.get("/train")
-async def train_route():
+def train_route():
+
     try:
+
+        print("=" * 60)
+        print("TRAINING STARTED")
+        print("=" * 60)
+
+        # Check MongoDB environment variable
+        mongo_url = os.getenv("MONGO_DB_URL")
+
+        if not mongo_url:
+            raise RuntimeError(
+                "MONGO_DB_URL environment variable is not set on Render"
+            )
+
+        print("MongoDB environment variable found")
+
+        # Create training pipeline
         train_pipeline = TrainPipeline()
+
+        print("TrainPipeline initialized")
+
+        # Run complete pipeline
         train_pipeline.run_pipeline()
-        return Response("Training Successful")
 
-    except Exception as e:
-        return Response(f"Error Occurred: {e}")
+        print("=" * 60)
+        print("TRAINING COMPLETED")
+        print("=" * 60)
 
-
-@app.post("/predict")
-async def predict_route(file: UploadFile = File(...)):
-    try:
-
-        # ==========================================
-        # SAVE UPLOADED FILE
-        # ==========================================
-
-        temp_file_path = "prediction.csv"
-
-        with open(temp_file_path, "wb") as f:
-            f.write(await file.read())
-
-        # ==========================================
-        # READ CSV
-        # ==========================================
-
-        df = pd.read_csv(temp_file_path)
-
-        # Replace "na" with NaN
-        df.replace("na", np.nan, inplace=True)
-
-        # ==========================================
-        # LOAD SCHEMA
-        # ==========================================
-
-        schema = read_yaml_file(SCHEMA_FILE_PATH)
-
-        drop_columns = schema.get("drop_columns", [])
-
-        # Drop columns removed during training
-        df.drop(
-            columns=drop_columns,
-            inplace=True,
-            errors="ignore"
+        # Check whether model exists after training
+        model_resolver = ModelResolver(
+            model_dir=SAVED_MODEL_DIR
         )
 
-        # Remove target column if uploaded
-        if "class" in df.columns:
-            df.drop(columns=["class"], inplace=True)
+        if model_resolver.is_model_exists():
 
-        # ==========================================
-        # KEEP SAME COLUMN ORDER AS TRAINING
-        # ==========================================
+            print("MODEL FOUND AFTER TRAINING")
 
-        feature_columns = schema["numerical_columns"]
+            return Response(
+                content="Training Successful - Model created successfully",
+                status_code=200
+            )
 
-        feature_columns = [
-            col for col in feature_columns
-            if col not in drop_columns
-        ]
+        else:
 
-        # Add missing columns if any
-        for col in feature_columns:
-            if col not in df.columns:
-                df[col] = np.nan
+            print("MODEL NOT FOUND AFTER TRAINING")
 
-        # Keep only training columns
-        df = df[feature_columns]
+            return Response(
+                content=(
+                    "Training completed, but model was not found. "
+                    "Check ModelPusher and SAVED_MODEL_DIR."
+                ),
+                status_code=500
+            )
 
-        print("Prediction Shape :", df.shape)
+    except Exception as e:
 
-        # ==========================================
-        # LOAD MODEL
-        # ==========================================
+        import traceback
+
+        print("=" * 60)
+        print("TRAINING FAILED")
+        print("=" * 60)
+
+        traceback.print_exc()
+
+        return Response(
+            content=f"Training failed: {repr(e)}",
+            status_code=500
+        )
+
+
+# =========================================================
+# PREDICT
+# =========================================================
+
+@app.post("/predict")
+async def predict_route(
+    file: UploadFile = File(...)
+):
+
+    try:
+
+        # =====================================================
+        # CHECK MODEL
+        # =====================================================
 
         model_resolver = ModelResolver(
             model_dir=SAVED_MODEL_DIR
         )
 
         if not model_resolver.is_model_exists():
-            return Response("Model not found")
 
-        model = load_object(
-            model_resolver.get_best_model_path()
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Model not found. "
+                    "Please run /train successfully first."
+                )
+            )
+
+        print("Model found")
+
+        # =====================================================
+        # SAVE UPLOADED FILE
+        # =====================================================
+
+        temp_file_path = "prediction.csv"
+
+        with open(temp_file_path, "wb") as f:
+
+            f.write(
+                await file.read()
+            )
+
+        # =====================================================
+        # READ CSV
+        # =====================================================
+
+        df = pd.read_csv(temp_file_path)
+
+        print("Original Prediction Shape:", df.shape)
+
+        # =====================================================
+        # REPLACE NA
+        # =====================================================
+
+        df.replace(
+            "na",
+            np.nan,
+            inplace=True
         )
 
-        # ==========================================
-        # PREDICT
-        # ==========================================
+        # =====================================================
+        # LOAD SCHEMA
+        # =====================================================
+
+        schema = read_yaml_file(
+            SCHEMA_FILE_PATH
+        )
+
+        drop_columns = schema.get(
+            "drop_columns",
+            []
+        )
+
+        # =====================================================
+        # DROP TRAINING REMOVED COLUMNS
+        # =====================================================
+
+        df.drop(
+            columns=drop_columns,
+            inplace=True,
+            errors="ignore"
+        )
+
+        # =====================================================
+        # REMOVE TARGET COLUMN
+        # =====================================================
+
+        if "class" in df.columns:
+
+            df.drop(
+                columns=["class"],
+                inplace=True
+            )
+
+        # =====================================================
+        # TRAINING FEATURE ORDER
+        # =====================================================
+
+        feature_columns = schema[
+            "numerical_columns"
+        ]
+
+        feature_columns = [
+            col
+            for col in feature_columns
+            if col not in drop_columns
+        ]
+
+        # =====================================================
+        # ADD MISSING COLUMNS
+        # =====================================================
+
+        for col in feature_columns:
+
+            if col not in df.columns:
+
+                df[col] = np.nan
+
+        # =====================================================
+        # KEEP ONLY TRAINING COLUMNS
+        # =====================================================
+
+        df = df[
+            feature_columns
+        ]
+
+        print(
+            "Final Prediction Shape:",
+            df.shape
+        )
+
+        # =====================================================
+        # LOAD MODEL
+        # =====================================================
+
+        model_path = (
+            model_resolver
+            .get_best_model_path()
+        )
+
+        print(
+            "Loading model from:",
+            model_path
+        )
+
+        model = load_object(
+            model_path
+        )
+
+        # =====================================================
+        # PREDICTION
+        # =====================================================
 
         prediction = model.predict(df)
 
         df["prediction"] = prediction
 
-        df["prediction"] = df["prediction"].replace(
-            TargetValueMapping().reverse_mapping()
+        # =====================================================
+        # REVERSE TARGET MAPPING
+        # =====================================================
+
+        df["prediction"] = df[
+            "prediction"
+        ].replace(
+            TargetValueMapping()
+            .reverse_mapping()
         )
+
+        # =====================================================
+        # OUTPUT FILE
+        # =====================================================
 
         output_path = "prediction_output.csv"
 
@@ -177,33 +325,61 @@ async def predict_route(file: UploadFile = File(...)):
             index=False
         )
 
+        print(
+            "Prediction completed successfully"
+        )
+
+        # =====================================================
+        # RETURN FILE
+        # =====================================================
+
         return FileResponse(
             output_path,
             filename="prediction_output.csv",
             media_type="text/csv"
         )
 
+    except HTTPException:
+        raise
+
     except Exception as e:
+
         import traceback
+
+        print("=" * 60)
+        print("PREDICTION FAILED")
+        print("=" * 60)
+
         traceback.print_exc()
-        return Response(f"Error Occurred:\n{e}")
 
-def open_browser():
-    webbrowser.open(f"http://127.0.0.1:{APP_PORT}/docs")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
+
+# =========================================================
+# LOCAL DEVELOPMENT
+# =========================================================
 
 if __name__ == "__main__":
+
+    from uvicorn import run
+
     try:
-        set_env_variable(env_file_path)
 
-        threading.Timer(1.5, open_browser).start()
-
-        app_run(
-            app,
-            host="127.0.0.1",
-            port=APP_PORT
+        run(
+            "app:app",
+            host="0.0.0.0",
+            port=int(
+                os.getenv(
+                    "PORT",
+                    APP_PORT
+                )
+            )
         )
 
     except Exception as e:
+
         logging.exception(e)
         print(e)

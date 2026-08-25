@@ -1,4 +1,5 @@
 import sys
+import traceback
 
 from sensor.entity.config_entity import (
     TrainingPipelineConfig,
@@ -41,13 +42,24 @@ class TrainPipeline:
 
             self.is_pipeline_running = False
 
+            # Initialize artifacts
+            self.data_ingestion_artifact = None
+            self.data_validation_artifact = None
+            self.data_transformation_artifact = None
+            self.model_trainer_artifact = None
+            self.model_evaluation_artifact = None
+            self.model_pusher_artifact = None
+
         except Exception as e:
 
-            raise SensorException(e, sys)
+            raise SensorException(
+                e,
+                sys
+            )
 
-    # =====================================================
+    # =========================================================
     # DATA INGESTION
-    # =====================================================
+    # =========================================================
 
     def start_data_ingestion(
         self
@@ -55,13 +67,13 @@ class TrainPipeline:
 
         try:
 
+            print("=" * 60)
             print("DATA INGESTION STARTED")
+            print("=" * 60)
 
-            data_ingestion_config = (
-                DataIngestionConfig(
-                    training_pipeline_config=
-                    self.training_pipeline_config
-                )
+            data_ingestion_config = DataIngestionConfig(
+                training_pipeline_config=
+                self.training_pipeline_config
             )
 
             data_ingestion = DataIngestion(
@@ -74,17 +86,29 @@ class TrainPipeline:
                 .initiate_data_ingestion()
             )
 
+            print(
+                "DATA INGESTION ARTIFACT:",
+                data_ingestion_artifact
+            )
+
+            print("=" * 60)
             print("DATA INGESTION COMPLETED")
+            print("=" * 60)
 
             return data_ingestion_artifact
 
         except Exception as e:
 
-            raise SensorException(e, sys)
+            traceback.print_exc()
 
-    # =====================================================
+            raise SensorException(
+                e,
+                sys
+            )
+
+    # =========================================================
     # DATA VALIDATION
-    # =====================================================
+    # =========================================================
 
     def start_data_validation(
         self,
@@ -94,7 +118,9 @@ class TrainPipeline:
 
         try:
 
+            print("=" * 60)
             print("DATA VALIDATION STARTED")
+            print("=" * 60)
 
             data_validation_config = (
                 DataValidationConfig(
@@ -116,17 +142,29 @@ class TrainPipeline:
                 .initiate_data_validation()
             )
 
+            print(
+                "DATA VALIDATION ARTIFACT:",
+                data_validation_artifact
+            )
+
+            print("=" * 60)
             print("DATA VALIDATION COMPLETED")
+            print("=" * 60)
 
             return data_validation_artifact
 
         except Exception as e:
 
-            raise SensorException(e, sys)
+            traceback.print_exc()
 
-    # =====================================================
+            raise SensorException(
+                e,
+                sys
+            )
+
+    # =========================================================
     # DATA TRANSFORMATION
-    # =====================================================
+    # =========================================================
 
     def start_data_transformation(
         self,
@@ -136,7 +174,9 @@ class TrainPipeline:
 
         try:
 
+            print("=" * 60)
             print("DATA TRANSFORMATION STARTED")
+            print("=" * 60)
 
             data_transformation_config = (
                 DataTransformationConfig(
@@ -145,14 +185,12 @@ class TrainPipeline:
                 )
             )
 
-            data_transformation = (
-                DataTransformation(
-                    data_validation_artifact=
-                    data_validation_artifact,
+            data_transformation = DataTransformation(
+                data_validation_artifact=
+                data_validation_artifact,
 
-                    data_transformation_config=
-                    data_transformation_config
-                )
+                data_transformation_config=
+                data_transformation_config
             )
 
             data_transformation_artifact = (
@@ -160,17 +198,29 @@ class TrainPipeline:
                 .initiate_data_transformation()
             )
 
+            print(
+                "DATA TRANSFORMATION ARTIFACT:",
+                data_transformation_artifact
+            )
+
+            print("=" * 60)
             print("DATA TRANSFORMATION COMPLETED")
+            print("=" * 60)
 
             return data_transformation_artifact
 
         except Exception as e:
 
-            raise SensorException(e, sys)
+            traceback.print_exc()
 
-    # =====================================================
-    # MODEL TRAINER
-    # =====================================================
+            raise SensorException(
+                e,
+                sys
+            )
+
+    # =========================================================
+    # MODEL TRAINING
+    # =========================================================
 
     def start_model_trainer(
         self,
@@ -180,7 +230,9 @@ class TrainPipeline:
 
         try:
 
+            print("=" * 60)
             print("MODEL TRAINER STARTED")
+            print("=" * 60)
 
             model_trainer_config = (
                 ModelTrainerConfig(
@@ -202,23 +254,45 @@ class TrainPipeline:
                 .initiate_model_trainer()
             )
 
+            print(
+                "MODEL TRAINER ARTIFACT:",
+                model_trainer_artifact
+            )
+
+            print("=" * 60)
             print("MODEL TRAINER COMPLETED")
+            print("=" * 60)
 
             return model_trainer_artifact
 
         except Exception as e:
 
-            raise SensorException(e, sys)
+            traceback.print_exc()
 
-    # =====================================================
+            raise SensorException(
+                e,
+                sys
+            )
+
+    # =========================================================
     # MODEL EVALUATION
-    # =====================================================
+    # =========================================================
 
-    def start_model_evaluation(self,data_validation_artifact:DataValidationArtifact,model_trainer_artifact:ModelTrainerArtifact) -> ModelEvaluationArtifact:
+    def start_model_evaluation(
+        self,
+        data_validation_artifact:
+        DataValidationArtifact,
+
+        model_trainer_artifact:
+        ModelTrainerArtifact
+
+    ) -> ModelEvaluationArtifact:
 
         try:
 
+            print("=" * 60)
             print("MODEL EVALUATION STARTED")
+            print("=" * 60)
 
             model_eval_config = (
                 ModelEvaluationConfig(
@@ -243,17 +317,34 @@ class TrainPipeline:
                 .initiate_model_evaluation()
             )
 
+            print(
+                "MODEL EVALUATION ARTIFACT:",
+                model_eval_artifact
+            )
+
+            print(
+                "MODEL ACCEPTED:",
+                model_eval_artifact.is_model_accepted
+            )
+
+            print("=" * 60)
             print("MODEL EVALUATION COMPLETED")
+            print("=" * 60)
 
             return model_eval_artifact
 
         except Exception as e:
 
-            raise SensorException(e, sys)
+            traceback.print_exc()
 
-    # =====================================================
+            raise SensorException(
+                e,
+                sys
+            )
+
+    # =========================================================
     # MODEL PUSHER
-    # =====================================================
+    # =========================================================
 
     def start_model_pusher(
         self,
@@ -264,7 +355,9 @@ class TrainPipeline:
 
         try:
 
+            print("=" * 60)
             print("MODEL PUSHER STARTED")
+            print("=" * 60)
 
             model_pusher_config = (
                 ModelPusherConfig(
@@ -286,17 +379,29 @@ class TrainPipeline:
                 .initiate_model_pusher()
             )
 
+            print(
+                "MODEL PUSHER ARTIFACT:",
+                model_pusher_artifact
+            )
+
+            print("=" * 60)
             print("MODEL PUSHER COMPLETED")
+            print("=" * 60)
 
             return model_pusher_artifact
 
         except Exception as e:
 
-            raise SensorException(e, sys)
+            traceback.print_exc()
 
-    # =====================================================
-    # RUN COMPLETE PIPELINE
-    # =====================================================
+            raise SensorException(
+                e,
+                sys
+            )
+
+    # =========================================================
+    # RUN COMPLETE TRAINING PIPELINE
+    # =========================================================
 
     def run_pipeline(self):
 
@@ -304,11 +409,28 @@ class TrainPipeline:
 
             self.is_pipeline_running = True
 
-            print("PIPELINE STARTED")
+            print("\n")
+            print("=" * 70)
+            print("            TRAINING PIPELINE STARTED")
+            print("=" * 70)
+
+            # =================================================
+            # 1. DATA INGESTION
+            # =================================================
 
             self.data_ingestion_artifact = (
                 self.start_data_ingestion()
             )
+
+            if self.data_ingestion_artifact is None:
+
+                raise RuntimeError(
+                    "Data ingestion artifact is None"
+                )
+
+            # =================================================
+            # 2. DATA VALIDATION
+            # =================================================
 
             self.data_validation_artifact = (
                 self.start_data_validation(
@@ -317,12 +439,32 @@ class TrainPipeline:
                 )
             )
 
+            if self.data_validation_artifact is None:
+
+                raise RuntimeError(
+                    "Data validation artifact is None"
+                )
+
+            # =================================================
+            # 3. DATA TRANSFORMATION
+            # =================================================
+
             self.data_transformation_artifact = (
                 self.start_data_transformation(
                     data_validation_artifact=
                     self.data_validation_artifact
                 )
             )
+
+            if self.data_transformation_artifact is None:
+
+                raise RuntimeError(
+                    "Data transformation artifact is None"
+                )
+
+            # =================================================
+            # 4. MODEL TRAINING
+            # =================================================
 
             self.model_trainer_artifact = (
                 self.start_model_trainer(
@@ -331,8 +473,19 @@ class TrainPipeline:
                 )
             )
 
+            if self.model_trainer_artifact is None:
+
+                raise RuntimeError(
+                    "Model trainer artifact is None"
+                )
+
+            # =================================================
+            # 5. MODEL EVALUATION
+            # =================================================
+
             self.model_evaluation_artifact = (
                 self.start_model_evaluation(
+
                     data_validation_artifact=
                     self.data_validation_artifact,
 
@@ -341,7 +494,34 @@ class TrainPipeline:
                 )
             )
 
-            if self.model_evaluation_artifact.is_model_accepted:
+            if self.model_evaluation_artifact is None:
+
+                raise RuntimeError(
+                    "Model evaluation artifact is None"
+                )
+
+            # =================================================
+            # 6. MODEL ACCEPTANCE
+            # =================================================
+
+            print("=" * 70)
+
+            print(
+                "MODEL ACCEPTED:",
+                self.model_evaluation_artifact
+                .is_model_accepted
+            )
+
+            print("=" * 70)
+
+            # =================================================
+            # 7. MODEL PUSHER
+            # =================================================
+
+            if (
+                self.model_evaluation_artifact
+                .is_model_accepted
+            ):
 
                 self.model_pusher_artifact = (
                     self.start_model_pusher(
@@ -350,23 +530,51 @@ class TrainPipeline:
                     )
                 )
 
+                print("=" * 70)
                 print("MODEL ACCEPTED")
+                print("MODEL PUSHER COMPLETED")
+                print("=" * 70)
 
             else:
 
+                print("=" * 70)
                 print("MODEL REJECTED")
+                print(
+                    "Model will NOT be pushed."
+                )
+                print("=" * 70)
 
-            print(
-                "PIPELINE COMPLETED SUCCESSFULLY"
-            )
+            # =================================================
+            # PIPELINE COMPLETED
+            # =================================================
+
+            print("=" * 70)
+            print("TRAINING PIPELINE COMPLETED")
+            print("=" * 70)
+
+            return self.model_evaluation_artifact
 
         except Exception as e:
 
-            print("PIPELINE FAILED")
-            print(e)
+            print("\n")
+            print("=" * 70)
+            print("             TRAINING PIPELINE FAILED")
+            print("=" * 70)
 
-            raise SensorException(e, sys)
+            traceback.print_exc()
+
+            print("=" * 70)
+
+            raise SensorException(
+                e,
+                sys
+            )
 
         finally:
 
             self.is_pipeline_running = False
+
+            print(
+                "Pipeline running status:",
+                self.is_pipeline_running
+            )
