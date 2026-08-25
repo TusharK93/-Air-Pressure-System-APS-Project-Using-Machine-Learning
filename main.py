@@ -49,6 +49,14 @@ else:
 
 app = FastAPI()
 
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "APS Prediction API"
+    }
+
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,7 +74,56 @@ app.add_middleware(
 @app.get("/")
 def index():
     return RedirectResponse(url="/docs")
+@app.get("/debug-model")
+def debug_model():
 
+    try:
+
+        model_dir = SAVED_MODEL_DIR
+
+        result = {
+            "saved_model_dir": model_dir,
+            "absolute_path": os.path.abspath(model_dir),
+            "exists": os.path.exists(model_dir),
+            "contents": []
+        }
+
+        if os.path.exists(model_dir):
+
+            result["contents"] = os.listdir(
+                model_dir
+            )
+
+        model_resolver = ModelResolver(
+            model_dir=model_dir
+        )
+
+        result["model_exists"] = (
+            model_resolver.is_model_exists()
+        )
+
+        if result["model_exists"]:
+
+            result["model_path"] = (
+                model_resolver
+                .get_best_model_path()
+            )
+
+        return result
+
+    except Exception as e:
+
+        import traceback
+
+        traceback.print_exc()
+
+        return {
+            "error": str(e),
+            "saved_model_dir": SAVED_MODEL_DIR,
+            "absolute_path": os.path.abspath(
+                SAVED_MODEL_DIR
+            )
+        }
 
 # =========================================================
 # TRAIN
@@ -148,6 +205,23 @@ def train_route():
 # =========================================================
 # PREDICT
 # =========================================================
+@app.get("/model-status")
+def model_status():
+
+    model_resolver = ModelResolver(
+        model_dir=SAVED_MODEL_DIR
+    )
+
+    return {
+        "model_directory": SAVED_MODEL_DIR,
+        "directory_exists": os.path.exists(SAVED_MODEL_DIR),
+        "model_exists": model_resolver.is_model_exists(),
+        "files": (
+            os.listdir(SAVED_MODEL_DIR)
+            if os.path.exists(SAVED_MODEL_DIR)
+            else []
+        )
+    }
 
 @app.post("/predict")
 async def predict_route(
@@ -369,7 +443,7 @@ if __name__ == "__main__":
     try:
 
         run(
-            "app:app",
+            "main:app",
             host="0.0.0.0",
             port=int(
                 os.getenv(

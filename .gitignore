@@ -232,7 +232,7 @@ dist/
 
 # ML Generated Files
 artifacts/
-saved_models/
+# saved_models/
 logs/
 
 # Environment Variables
