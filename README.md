@@ -1,6 +1,6 @@
 # 🚀 Air Pressure System (APS) Failure Prediction Using Machine Learning
 
-## 📌 Project Overview
+## 📌 Project Overview --
 
 The **Air Pressure System (APS) Failure Prediction** project is an end-to-end Machine Learning application designed to predict failures in the **Air Pressure System (APS)** of heavy-duty vehicles. APS is a safety-critical component responsible for operating braking and suspension systems. Unexpected APS failures can lead to expensive maintenance, vehicle downtime, and serious safety risks.
 
