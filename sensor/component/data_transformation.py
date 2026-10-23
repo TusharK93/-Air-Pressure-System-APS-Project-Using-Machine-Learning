@@ -11,17 +11,14 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import RobustScaler
 
 from sensor.constant.training_pipeline import TARGET_COLUMN
-
 from sensor.entity.artifact_entity import (
     DataTransformationArtifact,
     DataValidationArtifact,
 )
-
 from sensor.entity.config_entity import DataTransformationConfig
-
 from sensor.exception import SensorException
 from sensor.logger import logging
-
+from sensor.utils import mlflow_utils as mlu
 from sensor.utils.main_utils import (
     save_numpy_array_data,
     save_object,
@@ -45,7 +42,6 @@ class DataTransformation:
     def read_data(file_path: str) -> pd.DataFrame:
         try:
             return pd.read_csv(file_path)
-
         except Exception as e:
             raise SensorException(e, sys) from e
 
@@ -109,10 +105,7 @@ class DataTransformation:
         try:
             logging.info("DATA TRANSFORMATION STARTED")
 
-            # ==================================================
-            # 1. READ TRAIN AND TEST DATA
-            # ==================================================
-
+            # 1. Read train and test data.
             train_df = self.read_data(
                 self.data_validation_artifact.valid_train_file_path
             )
@@ -136,10 +129,7 @@ class DataTransformation:
                     "from testing data."
                 )
 
-            # ==================================================
-            # 2. SEPARATE FEATURES AND TARGETS
-            # ==================================================
-
+            # 2. Separate features and target labels.
             input_feature_train_df = train_df.drop(
                 columns=[TARGET_COLUMN]
             )
@@ -148,13 +138,8 @@ class DataTransformation:
                 columns=[TARGET_COLUMN]
             )
 
-            y_train = self.convert_target(
-                train_df[TARGET_COLUMN]
-            )
-
-            y_test = self.convert_target(
-                test_df[TARGET_COLUMN]
-            )
+            y_train = self.convert_target(train_df[TARGET_COLUMN])
+            y_test = self.convert_target(test_df[TARGET_COLUMN])
 
             if list(input_feature_train_df.columns) != list(
                 input_feature_test_df.columns
@@ -163,26 +148,16 @@ class DataTransformation:
                     "Training and testing feature columns do not match."
                 )
 
-            # Release original DataFrames after extracting data.
             del train_df, test_df
             gc.collect()
 
-            # ==================================================
-            # 3. CREATE PREPROCESSOR
-            # ==================================================
-
+            # 3. Create the preprocessing pipeline.
             preprocessor = self.get_data_transformer_object()
 
-            # ==================================================
-            # 4. FIT ON TRAINING DATA ONLY
-            # ==================================================
-
+            # 4. Fit only on training data to prevent data leakage.
             preprocessor.fit(input_feature_train_df)
 
-            # ==================================================
-            # 5. TRANSFORM TRAINING DATA
-            # ==================================================
-
+            # 5. Transform training features.
             transformed_input_train_feature = preprocessor.transform(
                 input_feature_train_df
             )
@@ -192,14 +167,10 @@ class DataTransformation:
                 dtype=np.float32,
             )
 
-            # Release training DataFrame.
             del input_feature_train_df
             gc.collect()
 
-            # ==================================================
-            # 6. TRANSFORM TEST DATA
-            # ==================================================
-
+            # 6. Transform test features using the fitted preprocessor.
             transformed_input_test_feature = preprocessor.transform(
                 input_feature_test_df
             )
@@ -209,23 +180,15 @@ class DataTransformation:
                 dtype=np.float32,
             )
 
-            # Release test DataFrame.
             del input_feature_test_df
             gc.collect()
 
-            logging.info("DATA TRANSFORMATION COMPLETED")
+            logging.info("FEATURE TRANSFORMATION COMPLETED")
 
-            # ==================================================
-            # 7. DO NOT APPLY SMOTE TO THE TEST DATA
-            #
-            # No SMOTETomek or synthetic sample generation.
-            # Keep the original train/test class distributions.
-            # ==================================================
+            # 7. Do not resample the test set.
+            # No SMOTE or SMOTETomek is applied.
 
-            # ==================================================
-            # 8. COMBINE FEATURES AND TARGET
-            # ==================================================
-
+            # 8. Combine transformed features and target labels.
             train_arr = np.column_stack(
                 (
                     transformed_input_train_feature,
@@ -240,7 +203,6 @@ class DataTransformation:
                 )
             ).astype(np.float32, copy=False)
 
-            # Release intermediate arrays.
             del transformed_input_train_feature
             del transformed_input_test_feature
             del y_train, y_test
@@ -249,10 +211,30 @@ class DataTransformation:
             logging.info("Transformed train shape: %s", train_arr.shape)
             logging.info("Transformed test shape: %s", test_arr.shape)
 
-            # ==================================================
-            # 9. SAVE TRANSFORMED ARRAYS
-            # ==================================================
+            # 9. Log preprocessing parameters and metrics to MLflow.
+            mlu.log_params(
+                {
+                    "imputer": "SimpleImputer(constant, fill_value=0)",
+                    "scaler": "RobustScaler",
+                    "resampling": "none",
+                }
+            )
 
+            mlu.log_metrics(
+                {
+                    "transformed_train_rows": train_arr.shape[0],
+                    "transformed_test_rows": test_arr.shape[0],
+                    "transformed_feature_count": train_arr.shape[1] - 1,
+                    "transformed_train_pos_rate": float(
+                        train_arr[:, -1].mean()
+                    ),
+                    "transformed_test_pos_rate": float(
+                        test_arr[:, -1].mean()
+                    ),
+                }
+            )
+
+            # 10. Create output directories.
             os.makedirs(
                 os.path.dirname(
                     self.data_transformation_config.transformed_train_file_path
@@ -274,22 +256,21 @@ class DataTransformation:
                 exist_ok=True,
             )
 
+            # 11. Save transformed training data.
             save_numpy_array_data(
                 file_path=(
-                    self.data_transformation_config
-                    .transformed_train_file_path
+                    self.data_transformation_config.transformed_train_file_path
                 ),
                 array=train_arr,
             )
 
-            # Release training array before saving the test array.
             del train_arr
             gc.collect()
 
+            # 12. Save transformed test data.
             save_numpy_array_data(
                 file_path=(
-                    self.data_transformation_config
-                    .transformed_test_file_path
+                    self.data_transformation_config.transformed_test_file_path
                 ),
                 array=test_arr,
             )
@@ -297,14 +278,10 @@ class DataTransformation:
             del test_arr
             gc.collect()
 
-            # ==================================================
-            # 10. SAVE PREPROCESSOR
-            # ==================================================
-
+            # 13. Save the fitted preprocessor.
             save_object(
                 file_path=(
-                    self.data_transformation_config
-                    .transformed_object_file_path
+                    self.data_transformation_config.transformed_object_file_path
                 ),
                 obj=preprocessor,
             )
@@ -313,22 +290,16 @@ class DataTransformation:
             logging.info("test.npy SAVED")
             logging.info("preprocessing.pkl SAVED")
 
-            # ==================================================
-            # 11. RETURN ARTIFACT
-            # ==================================================
-
+            # 14. Return the transformation artifact.
             data_transformation_artifact = DataTransformationArtifact(
                 transformed_object_file_path=(
-                    self.data_transformation_config
-                    .transformed_object_file_path
+                    self.data_transformation_config.transformed_object_file_path
                 ),
                 transformed_train_file_path=(
-                    self.data_transformation_config
-                    .transformed_train_file_path
+                    self.data_transformation_config.transformed_train_file_path
                 ),
                 transformed_test_file_path=(
-                    self.data_transformation_config
-                    .transformed_test_file_path
+                    self.data_transformation_config.transformed_test_file_path
                 ),
             )
 

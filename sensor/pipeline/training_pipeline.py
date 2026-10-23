@@ -12,7 +12,7 @@ from sensor.entity.config_entity import (
     ModelEvaluationConfig,
     ModelPusherConfig,
 )
- 
+
 from sensor.entity.artifact_entity import (
     DataIngestionArtifact,
     DataValidationArtifact,
@@ -24,7 +24,7 @@ from sensor.entity.artifact_entity import (
 
 from sensor.exception import SensorException
 from sensor.logger import logging
-
+from sensor.utils import mlflow_utils as mlu
 
 from sensor.component.data_ingestion import DataIngestion
 from sensor.component.data_validation import DataValidation
@@ -32,7 +32,6 @@ from sensor.component.data_transformation import DataTransformation
 from sensor.component.data_trainer import ModelTrainer
 from sensor.component.model_evaluation import ModelEvaluation
 from sensor.component.model_pusher import ModelPusher
-
 
 
 class TrainPipeline:
@@ -47,6 +46,7 @@ class TrainPipeline:
         self.model_pusher_artifact = None
 
         self.is_pipeline_running = False
+        self.mlflow_run_id = None
 
     def start_data_ingestion(self) -> DataIngestionArtifact:
         try:
@@ -191,120 +191,78 @@ class TrainPipeline:
             raise SensorException(e, sys) from e
 
     def run_pipeline(self) -> ModelEvaluationArtifact:
-        """Run all six stages of the APS model training pipeline."""
+        """
+        Run the six-stage APS training pipeline.
 
+        MLflow records the pipeline run, tags and metrics.
+        Tracing records the root operation and individual stages.
+        """
         if self.is_pipeline_running:
-            raise RuntimeError("This training pipeline is already running.")
+            raise RuntimeError(
+                "This training pipeline is already running."
+            )
 
         self.is_pipeline_running = True
+        run_name = (
+            f"train_{self.training_pipeline_config.timestamp}"
+        )
 
         try:
-            logging.info("=" * 60)
-            logging.info("APS TRAINING PIPELINE STARTED")
-            logging.info("=" * 60)
+            with mlu.pipeline_run(
+                run_name,
+                tags={
+                    "pipeline": "aps-training",
+                    "trigger": "api:/train",
+                },
+            ) as run:
 
-            # 1. Data ingestion
-            logging.info("[1/6] DATA INGESTION")
-            self.data_ingestion_artifact = self.start_data_ingestion()
-
-            if self.data_ingestion_artifact is None:
-                raise RuntimeError("Data ingestion returned no artifact.")
-
-            gc.collect()
-
-            # 2. Data validation
-            logging.info("[2/6] DATA VALIDATION")
-            self.data_validation_artifact = self.start_data_validation(
-                data_ingestion_artifact=self.data_ingestion_artifact
-            )
-
-            if self.data_validation_artifact is None:
-                raise RuntimeError("Data validation returned no artifact.")
-
-            # Release the pipeline's reference to the ingestion artifact.
-            self.data_ingestion_artifact = None
-            gc.collect()
-
-            # 3. Data transformation
-            logging.info("[3/6] DATA TRANSFORMATION")
-            self.data_transformation_artifact = (
-                self.start_data_transformation(
-                    data_validation_artifact=self.data_validation_artifact
-                )
-            )
-
-            if self.data_transformation_artifact is None:
-                raise RuntimeError(
-                    "Data transformation returned no artifact."
+                self.mlflow_run_id = (
+                    run.info.run_id if run is not None else None
                 )
 
-            gc.collect()
+                with mlu.span(
+                    "APS_Training_Pipeline",
+                    inputs={"run_name": run_name},
+                ) as root_span:
 
-            # 4. Model training
-            logging.info("[4/6] MODEL TRAINING")
-            self.model_trainer_artifact = self.start_model_trainer(
-                data_transformation_artifact=self.data_transformation_artifact
-            )
+                    result = self._run_stages()
 
-            if self.model_trainer_artifact is None:
-                raise RuntimeError("Model training returned no artifact.")
+                    root_span.set_outputs(
+                        {
+                            "is_model_accepted": (
+                                result.is_model_accepted
+                            ),
+                            "improved_accuracy": (
+                                result.improved_accuracy
+                            ),
+                        }
+                    )
 
-            # Release the pipeline's reference to the transformation artifact.
-            self.data_transformation_artifact = None
-            gc.collect()
-
-            # 5. Model evaluation
-            logging.info("[5/6] MODEL EVALUATION")
-            self.model_evaluation_artifact = self.start_model_evaluation(
-                data_validation_artifact=self.data_validation_artifact,
-                model_trainer_artifact=self.model_trainer_artifact,
-            )
-
-            if self.model_evaluation_artifact is None:
-                raise RuntimeError("Model evaluation returned no artifact.")
-
-            # These artifacts are no longer needed by later pipeline stages.
-            self.data_validation_artifact = None
-            self.model_trainer_artifact = None
-            gc.collect()
-
-            # 6. Model acceptance and pushing
-            logging.info("[6/6] MODEL ACCEPTANCE AND PUSHING")
-
-            is_model_accepted = (
-                self.model_evaluation_artifact.is_model_accepted
-            )
-
-            logging.info("Model accepted: %s", is_model_accepted)
-
-            if is_model_accepted:
-                self.model_pusher_artifact = self.start_model_pusher(
-                    model_eval_artifact=self.model_evaluation_artifact
-                )
-                logging.info("Model pushing completed successfully.")
-            else:
-                logging.warning(
-                    "Model rejected. The model will not be pushed."
+                mlu.set_tags(
+                    {"pipeline_status": "completed"}
                 )
 
-            # Keep a local reference to the result before cleanup.
-            result = self.model_evaluation_artifact
-
-            logging.info("=" * 60)
-            logging.info("APS TRAINING PIPELINE COMPLETED")
-            logging.info("=" * 60)
-
-            return result
+                return result
 
         except Exception as e:
             logging.error("APS TRAINING PIPELINE FAILED")
             logging.error(traceback.format_exc())
+
+            try:
+                mlu.set_tags(
+                    {"pipeline_status": "failed"}
+                )
+            except Exception:
+                logging.exception(
+                    "Could not record MLflow failure status."
+                )
+
             raise SensorException(e, sys) from e
 
         finally:
             self.is_pipeline_running = False
 
-            # Clear references held by this pipeline instance.
+            # Release references to intermediate artifacts.
             self.data_ingestion_artifact = None
             self.data_validation_artifact = None
             self.data_transformation_artifact = None
@@ -318,3 +276,150 @@ class TrainPipeline:
                 "Training pipeline cleanup completed. Running: %s",
                 self.is_pipeline_running,
             )
+
+    def _run_stages(self) -> ModelEvaluationArtifact:
+        """Execute all six pipeline stages with MLflow tracing."""
+
+        logging.info("=" * 60)
+        logging.info("APS TRAINING PIPELINE STARTED")
+        logging.info("=" * 60)
+
+        # 1. Data ingestion
+        logging.info("[1/6] DATA INGESTION")
+
+        with mlu.stage("1_data_ingestion"):
+            self.data_ingestion_artifact = (
+                self.start_data_ingestion()
+            )
+
+        if self.data_ingestion_artifact is None:
+            raise RuntimeError(
+                "Data ingestion returned no artifact."
+            )
+
+        gc.collect()
+
+        # 2. Data validation
+        logging.info("[2/6] DATA VALIDATION")
+
+        with mlu.stage("2_data_validation"):
+            self.data_validation_artifact = (
+                self.start_data_validation(
+                    data_ingestion_artifact=(
+                        self.data_ingestion_artifact
+                    )
+                )
+            )
+
+        if self.data_validation_artifact is None:
+            raise RuntimeError(
+                "Data validation returned no artifact."
+            )
+
+        self.data_ingestion_artifact = None
+        gc.collect()
+
+        # 3. Data transformation
+        logging.info("[3/6] DATA TRANSFORMATION")
+
+        with mlu.stage("3_data_transformation"):
+            self.data_transformation_artifact = (
+                self.start_data_transformation(
+                    data_validation_artifact=(
+                        self.data_validation_artifact
+                    )
+                )
+            )
+
+        if self.data_transformation_artifact is None:
+            raise RuntimeError(
+                "Data transformation returned no artifact."
+            )
+
+        gc.collect()
+
+        # 4. Model training
+        logging.info("[4/6] MODEL TRAINING")
+
+        with mlu.stage("4_model_training"):
+            self.model_trainer_artifact = (
+                self.start_model_trainer(
+                    data_transformation_artifact=(
+                        self.data_transformation_artifact
+                    )
+                )
+            )
+
+        if self.model_trainer_artifact is None:
+            raise RuntimeError(
+                "Model training returned no artifact."
+            )
+
+        self.data_transformation_artifact = None
+        gc.collect()
+
+        # 5. Model evaluation
+        logging.info("[5/6] MODEL EVALUATION")
+
+        with mlu.stage("5_model_evaluation"):
+            self.model_evaluation_artifact = (
+                self.start_model_evaluation(
+                    data_validation_artifact=(
+                        self.data_validation_artifact
+                    ),
+                    model_trainer_artifact=(
+                        self.model_trainer_artifact
+                    ),
+                )
+            )
+
+        if self.model_evaluation_artifact is None:
+            raise RuntimeError(
+                "Model evaluation returned no artifact."
+            )
+
+        self.data_validation_artifact = None
+        self.model_trainer_artifact = None
+        gc.collect()
+
+        # 6. Model acceptance and pushing
+        logging.info("[6/6] MODEL ACCEPTANCE AND PUSHING")
+
+        is_model_accepted = (
+            self.model_evaluation_artifact.is_model_accepted
+        )
+
+        logging.info(
+            "Model accepted: %s", is_model_accepted
+        )
+
+        with mlu.stage("6_model_pusher"):
+            if is_model_accepted:
+                self.model_pusher_artifact = (
+                    self.start_model_pusher(
+                        model_eval_artifact=(
+                            self.model_evaluation_artifact
+                        )
+                    )
+                )
+
+                logging.info(
+                    "Model pushing completed successfully."
+                )
+            else:
+                logging.warning(
+                    "Model rejected. The model will not be pushed."
+                )
+
+        mlu.log_metric(
+            "model_pushed",
+            1 if is_model_accepted else 0,
+        )
+
+        result = self.model_evaluation_artifact
+
+        logging.info("=" * 60)
+        logging.info("APS TRAINING PIPELINE COMPLETED")
+        logging.info("=" * 60)
+
+        return result
