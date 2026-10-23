@@ -4,6 +4,7 @@ python-dotenv
 scikit-learn
 PyYAML
 dill
+dagshub
 scipy
 imblearn
 numpy
