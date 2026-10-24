@@ -500,7 +500,7 @@ async def predict_route(file: UploadFile = File(...)):
             except OSError:
                 logging.exception(
                     "Could not delete temporary prediction output."
-                )
+                ) 
 
 
 # =========================================================
