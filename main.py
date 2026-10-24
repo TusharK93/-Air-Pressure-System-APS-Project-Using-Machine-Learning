@@ -428,3 +428,21 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", APP_PORT)),
     )
+import os
+import mlflow
+from fastapi import HTTPException
+
+@app.get("/debug-mlflow-trace")
+@mlflow.trace
+def debug_mlflow_trace():
+    if not os.getenv("MLFLOW_TRACKING_URI"):
+        raise HTTPException(
+            status_code=500,
+            detail="MLFLOW_TRACKING_URI is missing",
+        )
+
+    return {
+        "status": "success",
+        "message": "Live MLflow trace test",
+        "training_performed": False,
+    }
