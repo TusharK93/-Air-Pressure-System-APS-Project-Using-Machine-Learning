@@ -1,310 +1,341 @@
-import sys
+
+import gc
 import os
+import sys
 
 import numpy as np
 import pandas as pd
-
-from imblearn.combine import SMOTETomek
 
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import RobustScaler
 
-from sensor.constant.training_pipeline import (
-    TARGET_COLUMN
-)
+from sensor.constant.training_pipeline import TARGET_COLUMN
 
 from sensor.entity.artifact_entity import (
     DataTransformationArtifact,
-    DataValidationArtifact
+    DataValidationArtifact,
 )
 
-from sensor.entity.config_entity import (
-    DataTransformationConfig
-)
+from sensor.entity.config_entity import DataTransformationConfig
 
 from sensor.exception import SensorException
-
 from sensor.logger import logging
-
-from sensor.ml.model.estimator import (
-    TargetValueMapping
-)
 
 from sensor.utils.main_utils import (
     save_numpy_array_data,
-    save_object
+    save_object,
 )
 
 
 class DataTransformation:
-    def __init__(self,data_validation_artifact: DataValidationArtifact,
-                 data_transformation_config: DataTransformationConfig):
+    def __init__(
+        self,
+        data_validation_artifact: DataValidationArtifact,
+        data_transformation_config: DataTransformationConfig,
+    ):
         try:
-            self.data_validation_artifact = (data_validation_artifact)
+            self.data_validation_artifact = data_validation_artifact
+            self.data_transformation_config = data_transformation_config
 
-            self.data_transformation_config = (data_transformation_config)
         except Exception as e:
-            raise SensorException(e, sys)
+            raise SensorException(e, sys) from e
 
     @staticmethod
     def read_data(file_path: str) -> pd.DataFrame:
-
         try:
-
             return pd.read_csv(file_path)
 
         except Exception as e:
-
-            raise SensorException(e, sys)
+            raise SensorException(e, sys) from e
 
     @classmethod
-    def get_data_transformer_object(
-        cls
-    ) -> Pipeline:
-
+    def get_data_transformer_object(cls) -> Pipeline:
         try:
-
-            logging.info(
-                "Creating preprocessing object"
-            )
+            logging.info("Creating preprocessing object")
 
             simple_imputer = SimpleImputer(
                 strategy="constant",
-                fill_value=0
+                fill_value=0,
             )
 
             robust_scaler = RobustScaler()
 
             preprocessor = Pipeline(
                 steps=[
-                    (
-                        "Imputer",
-                        simple_imputer
-                    ),
-
-                    (
-                        "RobustScaler",
-                        robust_scaler
-                    )
+                    ("Imputer", simple_imputer),
+                    ("RobustScaler", robust_scaler),
                 ]
             )
 
             return preprocessor
 
         except Exception as e:
+            raise SensorException(e, sys) from e
 
-            raise SensorException(e, sys)
+    @staticmethod
+    def convert_target(target_series: pd.Series) -> np.ndarray:
+        """Convert APS target labels into numeric binary labels."""
+
+        target_series = target_series.replace(
+            {
+                "neg": 0,
+                "pos": 1,
+            }
+        )
+
+        target_series = pd.to_numeric(
+            target_series,
+            errors="coerce",
+        )
+
+        if target_series.isna().any():
+            raise ValueError(
+                "Target column contains missing or invalid labels."
+            )
+
+        target_values = target_series.to_numpy(dtype=np.int8)
+
+        if not np.isin(target_values, [0, 1]).all():
+            raise ValueError(
+                "Target column must contain only binary labels 0 and 1."
+            )
+
+        return target_values
 
     def initiate_data_transformation(
-        self
+        self,
     ) -> DataTransformationArtifact:
-
         try:
-
-            print("DATA TRANSFORMATION STARTED")
+            logging.info("DATA TRANSFORMATION STARTED")
 
             # ==================================================
-            # READ TRAIN AND TEST DATA
+            # 1. READ TRAIN AND TEST DATA
             # ==================================================
 
-            train_df = DataTransformation.read_data(
+            train_df = self.read_data(
                 self.data_validation_artifact.valid_train_file_path
             )
 
-            test_df = DataTransformation.read_data(
+            test_df = self.read_data(
                 self.data_validation_artifact.valid_test_file_path
             )
 
-            print(f"Train Shape: {train_df.shape}")
-            print(f"Test Shape: {test_df.shape}")
+            logging.info("Train shape: %s", train_df.shape)
+            logging.info("Test shape: %s", test_df.shape)
+
+            if TARGET_COLUMN not in train_df.columns:
+                raise ValueError(
+                    f"Target column '{TARGET_COLUMN}' is missing "
+                    "from training data."
+                )
+
+            if TARGET_COLUMN not in test_df.columns:
+                raise ValueError(
+                    f"Target column '{TARGET_COLUMN}' is missing "
+                    "from testing data."
+                )
 
             # ==================================================
-            # PREPROCESSOR
-            # ==================================================
-
-            preprocessor = (
-                self.get_data_transformer_object()
-            )
-
-            # ==================================================
-            # TRAIN INPUT/TARGET
+            # 2. SEPARATE FEATURES AND TARGETS
             # ==================================================
 
             input_feature_train_df = train_df.drop(
                 columns=[TARGET_COLUMN]
             )
 
-            target_feature_train_df = (
-                train_df[TARGET_COLUMN]
-            )
-
-            # ==================================================
-            # TARGET MAPPING
-            # ==================================================
-
-            target_feature_train_df = (
-                target_feature_train_df
-                .replace({
-                    "neg": 0,
-                    "pos": 1
-                })
-            )
-
-            # convert target into integer
-            target_feature_train_df = (
-                pd.to_numeric(
-                    target_feature_train_df,
-                    errors="coerce"
-                )
-            )
-
-            target_feature_train_df = (
-                target_feature_train_df.astype(int)
-            )
-
-            # ==================================================
-            # TEST INPUT/TARGET
-            # ==================================================
-
             input_feature_test_df = test_df.drop(
                 columns=[TARGET_COLUMN]
             )
 
-            target_feature_test_df = (
+            y_train = self.convert_target(
+                train_df[TARGET_COLUMN]
+            )
+
+            y_test = self.convert_target(
                 test_df[TARGET_COLUMN]
             )
 
-            target_feature_test_df = (
-                target_feature_test_df
-                .replace({
-                    "neg": 0,
-                    "pos": 1
-                })
-            )
-
-            target_feature_test_df = (
-                pd.to_numeric(
-                    target_feature_test_df,
-                    errors="coerce"
+            if list(input_feature_train_df.columns) != list(
+                input_feature_test_df.columns
+            ):
+                raise ValueError(
+                    "Training and testing feature columns do not match."
                 )
-            )
 
-            target_feature_test_df = (
-                target_feature_test_df.astype(int)
-            )
-
-            print("TARGET COLUMN CONVERTED")
+            # Release original DataFrames after extracting data.
+            del train_df, test_df
+            gc.collect()
 
             # ==================================================
-            # FIT TRANSFORM
+            # 3. CREATE PREPROCESSOR
             # ==================================================
 
-            preprocessor_object = (
-                preprocessor.fit(
-                    input_feature_train_df
-                )
-            )
-
-            transformed_input_train_feature = (
-                preprocessor_object.transform(
-                    input_feature_train_df
-                )
-            )
-
-            transformed_input_test_feature = (
-                preprocessor_object.transform(
-                    input_feature_test_df
-                )
-            )
-
-            print("DATA TRANSFORMATION DONE")
+            preprocessor = self.get_data_transformer_object()
 
             # ==================================================
-            # SMOTE
+            # 4. FIT ON TRAINING DATA ONLY
             # ==================================================
 
-            smt = SMOTETomek(
-                sampling_strategy="minority",
-                random_state=42
+            preprocessor.fit(input_feature_train_df)
+
+            # ==================================================
+            # 5. TRANSFORM TRAINING DATA
+            # ==================================================
+
+            transformed_input_train_feature = preprocessor.transform(
+                input_feature_train_df
             )
 
-            input_feature_train_final, target_feature_train_final = (
-                smt.fit_resample(
+            transformed_input_train_feature = np.asarray(
+                transformed_input_train_feature,
+                dtype=np.float32,
+            )
+
+            # Release training DataFrame.
+            del input_feature_train_df
+            gc.collect()
+
+            # ==================================================
+            # 6. TRANSFORM TEST DATA
+            # ==================================================
+
+            transformed_input_test_feature = preprocessor.transform(
+                input_feature_test_df
+            )
+
+            transformed_input_test_feature = np.asarray(
+                transformed_input_test_feature,
+                dtype=np.float32,
+            )
+
+            # Release test DataFrame.
+            del input_feature_test_df
+            gc.collect()
+
+            logging.info("DATA TRANSFORMATION COMPLETED")
+
+            # ==================================================
+            # 7. DO NOT APPLY SMOTE TO THE TEST DATA
+            #
+            # No SMOTETomek or synthetic sample generation.
+            # Keep the original train/test class distributions.
+            # ==================================================
+
+            # ==================================================
+            # 8. COMBINE FEATURES AND TARGET
+            # ==================================================
+
+            train_arr = np.column_stack(
+                (
                     transformed_input_train_feature,
-                    target_feature_train_df
+                    y_train,
                 )
-            )
+            ).astype(np.float32, copy=False)
 
-            input_feature_test_final, target_feature_test_final = (
-                smt.fit_resample(
+            test_arr = np.column_stack(
+                (
                     transformed_input_test_feature,
-                    target_feature_test_df
+                    y_test,
                 )
+            ).astype(np.float32, copy=False)
+
+            # Release intermediate arrays.
+            del transformed_input_train_feature
+            del transformed_input_test_feature
+            del y_train, y_test
+            gc.collect()
+
+            logging.info("Transformed train shape: %s", train_arr.shape)
+            logging.info("Transformed test shape: %s", test_arr.shape)
+
+            # ==================================================
+            # 9. SAVE TRANSFORMED ARRAYS
+            # ==================================================
+
+            os.makedirs(
+                os.path.dirname(
+                    self.data_transformation_config.transformed_train_file_path
+                ),
+                exist_ok=True,
             )
 
-            print("SMOTE APPLIED")
+            os.makedirs(
+                os.path.dirname(
+                    self.data_transformation_config.transformed_test_file_path
+                ),
+                exist_ok=True,
+            )
 
-            # ==================================================
-            # CREATE NUMPY ARRAY
-            # ==================================================
-
-            train_arr = np.c_[
-                input_feature_train_final,
-                np.array(target_feature_train_final)
-            ]
-
-            test_arr = np.c_[
-                input_feature_test_final,
-                np.array(target_feature_test_final)
-            ]
-
-            # ==================================================
-            # SAVE TRANSFORMED FILES
-            # ==================================================
+            os.makedirs(
+                os.path.dirname(
+                    self.data_transformation_config.transformed_object_file_path
+                ),
+                exist_ok=True,
+            )
 
             save_numpy_array_data(
-                file_path=self.data_transformation_config.transformed_train_file_path,
-                array=train_arr
+                file_path=(
+                    self.data_transformation_config
+                    .transformed_train_file_path
+                ),
+                array=train_arr,
             )
 
+            # Release training array before saving the test array.
+            del train_arr
+            gc.collect()
+
             save_numpy_array_data(
-                file_path=self.data_transformation_config.transformed_test_file_path,
-                array=test_arr
+                file_path=(
+                    self.data_transformation_config
+                    .transformed_test_file_path
+                ),
+                array=test_arr,
             )
+
+            del test_arr
+            gc.collect()
+
+            # ==================================================
+            # 10. SAVE PREPROCESSOR
+            # ==================================================
 
             save_object(
-                file_path=self.data_transformation_config.transformed_object_file_path,
-                obj=preprocessor_object
+                file_path=(
+                    self.data_transformation_config
+                    .transformed_object_file_path
+                ),
+                obj=preprocessor,
             )
 
-            print("train.npy SAVED")
-            print("test.npy SAVED")
-            print("preprocessing.pkl SAVED")
+            logging.info("train.npy SAVED")
+            logging.info("test.npy SAVED")
+            logging.info("preprocessing.pkl SAVED")
 
             # ==================================================
-            # ARTIFACT
+            # 11. RETURN ARTIFACT
             # ==================================================
 
-            data_transformation_artifact = (
-                DataTransformationArtifact(
-                    transformed_object_file_path=
-                    self.data_transformation_config.transformed_object_file_path,
-
-                    transformed_train_file_path=
-                    self.data_transformation_config.transformed_train_file_path,
-
-                    transformed_test_file_path=
-                    self.data_transformation_config.transformed_test_file_path
-                )
+            data_transformation_artifact = DataTransformationArtifact(
+                transformed_object_file_path=(
+                    self.data_transformation_config
+                    .transformed_object_file_path
+                ),
+                transformed_train_file_path=(
+                    self.data_transformation_config
+                    .transformed_train_file_path
+                ),
+                transformed_test_file_path=(
+                    self.data_transformation_config
+                    .transformed_test_file_path
+                ),
             )
-            print("DATA TRANSFORMATION COMPLETED")
+
+            logging.info("DATA TRANSFORMATION FINISHED SUCCESSFULLY")
 
             return data_transformation_artifact
 
         except Exception as e:
-
-            print("DATA TRANSFORMATION ERROR")
-            print(e)
-
-            raise SensorException(e, sys)
+            logging.exception("DATA TRANSFORMATION FAILED")
+            raise SensorException(e, sys) from e
