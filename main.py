@@ -31,12 +31,12 @@ from sensor.logger import logging
 MLFLOW_TRACKING_URI = os.getenv(
     "MLFLOW_TRACKING_URI",
     "https://dagshub.com/tukumawat73/aps-fault-detection.mlflow",
-)
+).strip()
 
 MLFLOW_EXPERIMENT_NAME = os.getenv(
     "MLFLOW_EXPERIMENT_NAME",
-    "APS-Failure-Prediction",
-)
+    "aps-fault-detection",
+).strip()
 
 MLFLOW_ENABLED = False
 MLFLOW_CONFIG_ERROR = None
@@ -44,23 +44,24 @@ MLFLOW_EXPERIMENT_ID = None
 
 
 def configure_mlflow():
-    """Configure MLflow using Render environment variables."""
-
+    """Configure the MLflow tracking backend and target experiment."""
     global MLFLOW_ENABLED
     global MLFLOW_CONFIG_ERROR
     global MLFLOW_EXPERIMENT_ID
 
     try:
-        # Do not hard-code credentials in this file.
-        # Configure these in Render Environment settings.
-        username = os.getenv("MLFLOW_TRACKING_USERNAME")
-        password = os.getenv("MLFLOW_TRACKING_PASSWORD")
+        if not MLFLOW_TRACKING_URI:
+            raise ValueError("MLFLOW_TRACKING_URI is empty.")
 
-        if username:
-            os.environ["MLFLOW_TRACKING_USERNAME"] = username
+        if not os.getenv("MLFLOW_TRACKING_USERNAME"):
+            raise ValueError(
+                "MLFLOW_TRACKING_USERNAME is missing."
+            )
 
-        if password:
-            os.environ["MLFLOW_TRACKING_PASSWORD"] = password
+        if not os.getenv("MLFLOW_TRACKING_PASSWORD"):
+            raise ValueError(
+                "MLFLOW_TRACKING_PASSWORD is missing."
+            )
 
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
@@ -72,16 +73,14 @@ def configure_mlflow():
         MLFLOW_ENABLED = True
         MLFLOW_CONFIG_ERROR = None
 
-        logging.info("MLflow configuration succeeded.")
+        logging.info("MLflow configured successfully.")
+        logging.info("MLflow URI: %s", MLFLOW_TRACKING_URI)
         logging.info("MLflow experiment: %s", MLFLOW_EXPERIMENT_NAME)
         logging.info("MLflow experiment ID: %s", MLFLOW_EXPERIMENT_ID)
 
     except Exception as exc:
         MLFLOW_ENABLED = False
-        MLFLOW_CONFIG_ERROR = (
-            f"{type(exc).__name__}: {exc}"
-        )
-
+        MLFLOW_CONFIG_ERROR = f"{type(exc).__name__}: {exc}"
         logging.exception("MLflow configuration failed.")
 
 
@@ -107,15 +106,11 @@ app.add_middleware(
 
 
 # =========================================================
-# TRACE FLUSH HELPER
+# MLFLOW HELPERS
 # =========================================================
 
 def flush_mlflow_traces():
-    """
-    Flush pending asynchronous trace writes when the installed
-    MLflow version exposes the flush function.
-    """
-
+    """Flush queued trace writes if this MLflow version supports it."""
     flush_function = getattr(
         mlflow,
         "flush_trace_async_logging",
@@ -127,10 +122,20 @@ def flush_mlflow_traces():
         return True
 
     logging.warning(
-        "This MLflow version does not expose "
-        "flush_trace_async_logging()."
+        "MLflow trace flush is unavailable in this installed version."
     )
     return False
+
+
+def require_mlflow():
+    if not MLFLOW_ENABLED or not MLFLOW_EXPERIMENT_ID:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "MLflow is not configured.",
+                "error": MLFLOW_CONFIG_ERROR,
+            },
+        )
 
 
 # =========================================================
@@ -160,11 +165,11 @@ def index():
 
 
 # =========================================================
-# REAL LIVE TRACE PROBE
-# No dataset loading or model training.
+# LIVE TRACE TEST
+# Does not train a model or read a dataset.
 # =========================================================
 
-@mlflow.trace
+@mlflow.trace(name="APS_Render_Live_Trace_Test")
 def live_trace_probe():
     return {
         "message": "APS Render live tracing test",
@@ -174,88 +179,91 @@ def live_trace_probe():
 
 @app.get("/debug-mlflow-trace")
 def debug_mlflow_trace():
-    """
-    Execute a traced function, flush pending writes, and try to
-    verify that traces can be queried from the configured backend.
-    """
-
-    if not MLFLOW_ENABLED:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": "MLflow configuration failed.",
-                "error": MLFLOW_CONFIG_ERROR,
-            },
-        )
+    require_mlflow()
 
     try:
-        # Execute the decorated function: this creates a trace.
-        result = live_trace_probe()
-
-        # Flush asynchronous trace writes if supported.
-        flush_available = flush_mlflow_traces()
-
-        # Try to query recent traces. This is an additional
-        # verification step, not the trace creation itself.
-        trace_query_status = "not_checked"
-        trace_count = None
-        trace_query_error = None
-
-        search_traces = getattr(
-            mlflow,
-            "search_traces",
-            None,
+        # Ensure the intended experiment is selected for this request.
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        experiment = mlflow.set_experiment(
+            MLFLOW_EXPERIMENT_NAME
         )
 
-        if callable(search_traces):
-            try:
-                traces = search_traces(
-                    experiment_ids=[MLFLOW_EXPERIMENT_ID],
-                    max_results=10,
-                )
+        result = live_trace_probe()
 
-                trace_count = len(traces)
-                trace_query_status = "query_succeeded"
+        flush_available = flush_mlflow_traces()
 
-            except Exception as query_exc:
-                trace_query_status = "query_failed"
-                trace_query_error = (
-                    f"{type(query_exc).__name__}: {query_exc}"
-                )
+        # Search this experiment, not an unrelated debug experiment.
+        traces_df = mlflow.search_traces(
+            experiment_ids=[experiment.experiment_id],
+            max_results=20,
+            order_by=["timestamp_ms DESC"],
+        )
 
-                logging.exception(
-                    "Could not query MLflow traces."
-                )
+        trace_records = []
+
+        if isinstance(traces_df, pd.DataFrame):
+            for _, row in traces_df.iterrows():
+                record = {}
+
+                for column in (
+                    "trace_id",
+                    "client_request_id",
+                    "state",
+                    "status",
+                    "request",
+                    "response",
+                    "execution_time_ms",
+                    "timestamp_ms",
+                    "trace_name",
+                ):
+                    if column in traces_df.columns:
+                        value = row[column]
+
+                        if value is not None and not (
+                            isinstance(value, float)
+                            and np.isnan(value)
+                        ):
+                            record[column] = (
+                                value.item()
+                                if isinstance(value, np.generic)
+                                else value
+                            )
+
+                trace_records.append(record)
 
         return {
             "status": "success",
-            "message": "The traced function executed.",
+            "message": "Live trace probe executed.",
             "training_performed": False,
             "tracking_uri": mlflow.get_tracking_uri(),
             "experiment_name": MLFLOW_EXPERIMENT_NAME,
-            "experiment_id": MLFLOW_EXPERIMENT_ID,
-            "trace_function_executed": True,
+            "experiment_id": experiment.experiment_id,
             "trace_flush_available": flush_available,
-            "trace_query_status": trace_query_status,
-            "recent_trace_count": trace_count,
-            "trace_query_error": trace_query_error,
-            "result": result,
+            "trace_query_status": "query_succeeded",
+            "recent_trace_count": len(trace_records),
+            "newest_traces": trace_records,
+            "probe_result": result,
             "note": (
-                "A successful function execution does not alone "
-                "prove that the trace is visible in the DagsHub UI. "
-                "Check the experiment's Traces tab."
+                "Check newest_traces for the trace ID and request. "
+                "A successful query alone does not prove that this "
+                "specific trace was persisted."
             ),
         }
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
-        logging.exception("Live MLflow trace test failed.")
+        logging.exception("Live MLflow trace diagnostic failed.")
 
         raise HTTPException(
             status_code=500,
             detail={
-                "message": "Live MLflow trace test failed.",
+                "message": "Could not verify live MLflow traces.",
                 "error_type": type(exc).__name__,
                 "error": str(exc),
+                "experiment_name": MLFLOW_EXPERIMENT_NAME,
+                "experiment_id": MLFLOW_EXPERIMENT_ID,
             },
         ) from exc
 
@@ -273,30 +281,23 @@ def debug_model():
             "saved_model_dir": model_dir,
             "absolute_path": os.path.abspath(model_dir),
             "exists": os.path.exists(model_dir),
-            "contents": [],
+            "contents": (
+                os.listdir(model_dir)
+                if os.path.exists(model_dir)
+                else []
+            ),
         }
 
-        if os.path.exists(model_dir):
-            result["contents"] = os.listdir(model_dir)
-
-        model_resolver = ModelResolver(
-            model_dir=model_dir
-        )
-
-        result["model_exists"] = (
-            model_resolver.is_model_exists()
-        )
+        resolver = ModelResolver(model_dir=model_dir)
+        result["model_exists"] = resolver.is_model_exists()
 
         if result["model_exists"]:
-            result["model_path"] = (
-                model_resolver.get_best_model_path()
-            )
+            result["model_path"] = resolver.get_best_model_path()
 
         return result
 
     except Exception as exc:
         logging.exception("Debug model endpoint failed.")
-
         raise HTTPException(
             status_code=500,
             detail=f"Debug model failed: {exc}",
@@ -305,13 +306,13 @@ def debug_model():
 
 # =========================================================
 # TRAINING TRACE
-# Training runs only when /train is explicitly requested.
+# Training happens only when /train is called.
 # =========================================================
 
 def run_training_with_trace(train_pipeline):
     if not MLFLOW_ENABLED:
         logging.warning(
-            "MLflow is disabled; training will run without tracing."
+            "MLflow disabled; running training without MLflow tracing."
         )
         return train_pipeline.run_pipeline()
 
@@ -325,10 +326,7 @@ def run_training_with_trace(train_pipeline):
 
         result = train_pipeline.run_pipeline()
 
-        span.set_outputs({
-            "status": "completed",
-        })
-
+        span.set_outputs({"status": "completed"})
         return result
 
 
@@ -339,33 +337,29 @@ def train_route():
 
         if not os.getenv("MONGO_DB_URL"):
             raise RuntimeError(
-                "MONGO_DB_URL environment variable "
-                "is not set on Render."
+                "MONGO_DB_URL environment variable is missing."
             )
 
         train_pipeline = TrainPipeline()
         run_training_with_trace(train_pipeline)
 
-        model_resolver = ModelResolver(
-            model_dir=SAVED_MODEL_DIR
-        )
+        resolver = ModelResolver(model_dir=SAVED_MODEL_DIR)
 
-        if not model_resolver.is_model_exists():
+        if not resolver.is_model_exists():
             raise RuntimeError(
-                "Training returned, but no saved model was found."
+                "Training finished but no saved model was found."
             )
 
         return {
             "status": "success",
             "message": "Training completed successfully.",
-            "model_path": model_resolver.get_best_model_path(),
+            "model_path": resolver.get_best_model_path(),
             "mlflow_enabled": MLFLOW_ENABLED,
             "experiment": MLFLOW_EXPERIMENT_NAME,
         }
 
     except Exception as exc:
         logging.exception("TRAINING FAILED")
-
         raise HTTPException(
             status_code=500,
             detail=f"Training failed: {exc}",
@@ -374,7 +368,7 @@ def train_route():
 
 # =========================================================
 # PREDICTION TRACE
-# Records metadata only, not uploaded CSV row contents.
+# Only metadata is recorded; CSV row contents are not logged.
 # =========================================================
 
 def run_prediction_with_trace(model, dataframe):
@@ -387,9 +381,7 @@ def run_prediction_with_trace(model, dataframe):
         span.set_inputs({
             "row_count": int(len(dataframe)),
             "feature_count": int(len(dataframe.columns)),
-            "features": [
-                str(column) for column in dataframe.columns
-            ],
+            "features": [str(c) for c in dataframe.columns],
             "model_type": type(model).__name__,
         })
 
@@ -404,13 +396,11 @@ def run_prediction_with_trace(model, dataframe):
 
 
 # =========================================================
-# PREDICT
+# PREDICTION ENDPOINT
 # =========================================================
 
 @app.post("/predict")
-async def predict_route(
-    file: UploadFile = File(...),
-):
+async def predict_route(file: UploadFile = File(...)):
     output_path = None
     response_owns_output = False
 
@@ -424,17 +414,12 @@ async def predict_route(
                 detail="Please upload a CSV file.",
             )
 
-        model_resolver = ModelResolver(
-            model_dir=SAVED_MODEL_DIR
-        )
+        resolver = ModelResolver(model_dir=SAVED_MODEL_DIR)
 
-        if not model_resolver.is_model_exists():
+        if not resolver.is_model_exists():
             raise HTTPException(
                 status_code=404,
-                detail=(
-                    "Model not found on server. "
-                    "Verify the saved model directory."
-                ),
+                detail="Model not found on server.",
             )
 
         df = pd.read_csv(file.file)
@@ -450,32 +435,24 @@ async def predict_route(
         )
 
         if "class" in df.columns:
-            df.drop(
-                columns=["class"],
-                inplace=True,
-            )
+            df.drop(columns=["class"], inplace=True)
 
         feature_columns = [
-            column
-            for column in schema["numerical_columns"]
-            if column not in drop_columns
+            col
+            for col in schema["numerical_columns"]
+            if col not in drop_columns
         ]
 
-        for column in feature_columns:
-            if column not in df.columns:
-                df[column] = np.nan
+        for col in feature_columns:
+            if col not in df.columns:
+                df[col] = np.nan
 
         df = df[feature_columns]
 
-        model_path = model_resolver.get_best_model_path()
-        model = load_object(model_path)
+        model = load_object(resolver.get_best_model_path())
+        predictions = run_prediction_with_trace(model, df)
 
-        prediction = run_prediction_with_trace(
-            model,
-            df,
-        )
-
-        df["prediction"] = prediction
+        df["prediction"] = predictions
         df["prediction"] = df["prediction"].replace(
             TargetValueMapping().reverse_mapping()
         )
@@ -490,23 +467,17 @@ async def predict_route(
         ) as output_file:
             output_path = output_file.name
 
-        df.to_csv(
-            output_path,
-            index=False,
-        )
+        df.to_csv(output_path, index=False)
 
         response = FileResponse(
             path=output_path,
             filename="prediction_output.csv",
             media_type="text/csv",
             background=BackgroundTask(
-                lambda: Path(output_path).unlink(
-                    missing_ok=True
-                )
+                lambda: Path(output_path).unlink(missing_ok=True)
             ),
         )
 
-        # FileResponse's background task now owns cleanup.
         response_owns_output = True
         return response
 
@@ -515,7 +486,6 @@ async def predict_route(
 
     except Exception as exc:
         logging.exception("PREDICTION FAILED")
-
         raise HTTPException(
             status_code=500,
             detail=f"Prediction failed: {exc}",
@@ -524,14 +494,12 @@ async def predict_route(
     finally:
         await file.close()
 
-        # Clean up files created before a successful FileResponse
-        # took ownership of the output file.
         if output_path and not response_owns_output:
             try:
                 Path(output_path).unlink(missing_ok=True)
             except OSError:
                 logging.exception(
-                    "Could not remove temporary prediction file."
+                    "Could not delete temporary prediction output."
                 )
 
 
