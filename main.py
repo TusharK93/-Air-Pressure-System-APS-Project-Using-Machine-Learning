@@ -1,16 +1,17 @@
 
 import os
-import traceback
+import tempfile
+from pathlib import Path
 from contextlib import nullcontext
 
 import mlflow
-import mlflow.sklearn
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import Response, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from starlette.responses import RedirectResponse
 
 from sensor.constant.training_pipeline import (
@@ -25,50 +26,48 @@ from sensor.logger import logging
 
 
 # =========================================================
-# MLFLOW CONFIGURATION
+# MLFLOW / DAGSHUB CONFIGURATION
 # =========================================================
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
+MLFLOW_TRACKING_URI = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    "https://dagshub.com/tukumawat73/aps-fault-detection.mlflow",
+)
+
 MLFLOW_EXPERIMENT_NAME = os.getenv(
     "MLFLOW_EXPERIMENT_NAME",
     "APS-Failure-Prediction",
 )
 
 MLFLOW_ENABLED = False
-MLFLOW_AUTOLOG_ENABLED = False
 
 
 def configure_mlflow():
-    """
-    Configure remote MLflow tracking and scikit-learn autologging.
-    """
+    """Configure MLflow tracking without training a model."""
 
-    global MLFLOW_ENABLED, MLFLOW_AUTOLOG_ENABLED
-
-    if not MLFLOW_TRACKING_URI:
-        logging.warning(
-            "MLFLOW_TRACKING_URI is missing. "
-            "MLflow tracking is disabled."
-        )
-        return
+    global MLFLOW_ENABLED
 
     try:
+        # Credentials are read from Render Environment variables.
+        # Never hard-code your DagsHub token here.
+        username = os.getenv("MLFLOW_TRACKING_USERNAME")
+        password = os.getenv("MLFLOW_TRACKING_PASSWORD")
+
+        if username:
+            os.environ["MLFLOW_TRACKING_USERNAME"] = username
+
+        if password:
+            os.environ["MLFLOW_TRACKING_PASSWORD"] = password
+
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
+        # Set the experiment for traces and tracking operations.
         mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
-        # Automatically record supported scikit-learn training details.
-        mlflow.sklearn.autolog(
-                  log_models=False,
-                  log_input_examples=False,
-                  log_model_signatures=False,
-                  log_datasets=False,
-             )
-
         MLFLOW_ENABLED = True
-        MLFLOW_AUTOLOG_ENABLED = True
 
         logging.info("MLflow tracking configured.")
+        logging.info("MLflow URI: %s", MLFLOW_TRACKING_URI)
         logging.info(
             "MLflow experiment: %s",
             MLFLOW_EXPERIMENT_NAME,
@@ -76,10 +75,9 @@ def configure_mlflow():
 
     except Exception:
         MLFLOW_ENABLED = False
-        MLFLOW_AUTOLOG_ENABLED = False
-
         logging.exception(
-            "MLflow configuration failed."
+            "MLflow configuration failed. "
+            "The API will continue without MLflow tracing."
         )
 
 
@@ -105,100 +103,6 @@ app.add_middleware(
 
 
 # =========================================================
-# TRAINING WITH MLFLOW RUN + TRACE
-# =========================================================
-
-def run_training_with_trace(train_pipeline):
-    """
-    Create an MLflow run for the training pipeline.
-
-    Scikit-learn autologging records supported estimator
-    parameters, metrics and model artifacts during fit().
-    """
-
-    if not MLFLOW_ENABLED:
-        logging.warning(
-            "Running training without MLflow tracking."
-        )
-        return train_pipeline.run_pipeline()
-
-    # If the tracking server cannot create a run, do not prevent
-    # the existing training pipeline from running.
-    try:
-        active_run = mlflow.start_run(
-            run_name="APS_Training_Pipeline"
-        )
-    except Exception:
-        logging.exception(
-            "Could not start MLflow run. "
-            "Running training without MLflow."
-        )
-        return train_pipeline.run_pipeline()
-
-    # Once the run is created, let training exceptions propagate.
-    # This avoids accidentally running a failed training job twice.
-    with active_run:
-        mlflow.set_tag("project", "APS-Failure-Prediction")
-        mlflow.set_tag("operation", "training")
-        mlflow.set_tag("training_pipeline", "TrainPipeline")
-
-        # Add an explicit trace when supported by the installed
-        # MLflow version and tracking backend.
-        with mlflow.start_span(
-            name="APS_Training_Pipeline"
-        ) as span:
-            span.set_inputs({
-                "pipeline": "TrainPipeline",
-                "project": "APS Failure Prediction",
-            })
-
-            result = train_pipeline.run_pipeline()
-
-            span.set_outputs({
-                "status": "completed",
-            })
-
-            mlflow.set_tag("training_status", "completed")
-
-            return result
-
-
-# =========================================================
-# PREDICTION TRACE
-# =========================================================
-
-def run_prediction_with_trace(model, dataframe):
-    """
-    Trace prediction without recording uploaded CSV values.
-    """
-
-    if not MLFLOW_ENABLED:
-        return model.predict(dataframe)
-
-    with mlflow.start_span(
-        name="APS_Model_Prediction"
-    ) as span:
-
-        span.set_inputs({
-            "row_count": int(len(dataframe)),
-            "feature_count": int(len(dataframe.columns)),
-            "features": [
-                str(column) for column in dataframe.columns
-            ],
-            "model_type": type(model).__name__,
-        })
-
-        predictions = model.predict(dataframe)
-
-        span.set_outputs({
-            "prediction_count": int(len(predictions)),
-            "status": "completed",
-        })
-
-        return predictions
-
-
-# =========================================================
 # HEALTH CHECK
 # =========================================================
 
@@ -208,7 +112,6 @@ def health():
         "status": "ok",
         "service": "APS Prediction API",
         "mlflow_enabled": MLFLOW_ENABLED,
-        "mlflow_autolog_enabled": MLFLOW_AUTOLOG_ENABLED,
         "mlflow_experiment": MLFLOW_EXPERIMENT_NAME,
     }
 
@@ -220,6 +123,23 @@ def health():
 @app.get("/")
 def index():
     return RedirectResponse(url="/docs")
+
+
+# =========================================================
+# MLFLOW TRACE DIAGNOSTIC
+# Does not load a dataset or train a model.
+# =========================================================
+
+@app.get("/debug-mlflow-trace")
+@mlflow.trace
+def debug_mlflow_trace():
+    return {
+        "status": "success",
+        "message": "Render-to-MLflow trace test",
+        "training_performed": False,
+        "mlflow_enabled": MLFLOW_ENABLED,
+        "experiment": MLFLOW_EXPERIMENT_NAME,
+    }
 
 
 # =========================================================
@@ -263,19 +183,51 @@ def debug_model():
 
 
 # =========================================================
-# TRAIN
+# TRAINING TRACE
+# Training runs only when /train is explicitly requested.
 # =========================================================
+
+def run_training_with_trace(train_pipeline):
+    """Run training with an MLflow trace when available."""
+
+    if not MLFLOW_ENABLED:
+        logging.warning(
+            "MLflow is disabled; running without tracing."
+        )
+        return train_pipeline.run_pipeline()
+
+    try:
+        # This span records pipeline execution without automatically
+        # logging datasets, model artifacts, or uploaded data.
+        with mlflow.start_span(
+            name="APS_Training_Pipeline"
+        ) as span:
+            span.set_inputs({
+                "pipeline": "TrainPipeline",
+                "operation": "training",
+            })
+
+            result = train_pipeline.run_pipeline()
+
+            span.set_outputs({
+                "status": "completed",
+            })
+
+            return result
+
+    except Exception:
+        logging.exception(
+            "Training failed. Check Render logs for the full traceback."
+        )
+        raise
+
 
 @app.get("/train")
 def train_route():
     try:
-        logging.info("=" * 60)
-        logging.info("TRAINING STARTED")
-        logging.info("=" * 60)
+        logging.info("APS TRAINING REQUESTED")
 
-        mongo_url = os.getenv("MONGO_DB_URL")
-
-        if not mongo_url:
+        if not os.getenv("MONGO_DB_URL"):
             raise RuntimeError(
                 "MONGO_DB_URL environment variable "
                 "is not set on Render."
@@ -285,35 +237,61 @@ def train_route():
 
         run_training_with_trace(train_pipeline)
 
-        logging.info("TRAINING COMPLETED")
-
         model_resolver = ModelResolver(
             model_dir=SAVED_MODEL_DIR
         )
 
-        if model_resolver.is_model_exists():
-            model_path = model_resolver.get_best_model_path()
+        if not model_resolver.is_model_exists():
+            raise RuntimeError(
+                "Training returned, but no saved model was found."
+            )
 
-            return {
-                "status": "success",
-                "message": "Training completed successfully.",
-                "model_path": model_path,
-                "mlflow_enabled": MLFLOW_ENABLED,
-                "experiment": MLFLOW_EXPERIMENT_NAME,
-            }
-
-        return Response(
-            content="Training completed, but model was not found.",
-            status_code=500,
-        )
+        return {
+            "status": "success",
+            "message": "Training completed successfully.",
+            "model_path": model_resolver.get_best_model_path(),
+            "mlflow_enabled": MLFLOW_ENABLED,
+            "experiment": MLFLOW_EXPERIMENT_NAME,
+        }
 
     except Exception as e:
         logging.exception("TRAINING FAILED")
 
-        return Response(
-            content=f"Training failed: {repr(e)}",
+        raise HTTPException(
             status_code=500,
-        )
+            detail=f"Training failed: {str(e)}",
+        ) from e
+
+
+# =========================================================
+# PREDICTION TRACE
+# Only metadata is recorded; CSV values are not passed to MLflow.
+# =========================================================
+
+def run_prediction_with_trace(model, dataframe):
+    """Predict with a trace containing metadata, not row contents."""
+
+    if not MLFLOW_ENABLED:
+        return model.predict(dataframe)
+
+    with mlflow.start_span(
+        name="APS_Model_Prediction"
+    ) as span:
+        span.set_inputs({
+            "row_count": int(len(dataframe)),
+            "feature_count": int(len(dataframe.columns)),
+            "features": [str(c) for c in dataframe.columns],
+            "model_type": type(model).__name__,
+        })
+
+        predictions = model.predict(dataframe)
+
+        span.set_outputs({
+            "prediction_count": int(len(predictions)),
+            "status": "completed",
+        })
+
+        return predictions
 
 
 # =========================================================
@@ -322,11 +300,13 @@ def train_route():
 
 @app.post("/predict")
 async def predict_route(file: UploadFile = File(...)):
-    temp_file_path = "prediction.csv"
-    output_path = "prediction_output.csv"
+    output_path = None
 
     try:
-        if not file.filename or not file.filename.lower().endswith(".csv"):
+        if (
+            not file.filename
+            or not file.filename.lower().endswith(".csv")
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="Please upload a CSV file.",
@@ -341,22 +321,18 @@ async def predict_route(file: UploadFile = File(...)):
                 status_code=404,
                 detail=(
                     "Model not found on server. "
-                    "Run training and verify the model directory."
+                    "Verify the saved model directory."
                 ),
             )
 
-        # Read the uploaded CSV.
-        uploaded_content = await file.read()
-
-        with open(temp_file_path, "wb") as f:
-            f.write(uploaded_content)
-
-        df = pd.read_csv(temp_file_path)
+        # Read directly from the uploaded file stream to avoid
+        # creating an additional copy of the uploaded bytes.
+        df = pd.read_csv(file.file)
 
         # Normalize missing-value markers.
         df.replace("na", np.nan, inplace=True)
 
-        # Load the project schema.
+        # Load schema.
         schema = read_yaml_file(SCHEMA_FILE_PATH)
         drop_columns = schema.get("drop_columns", [])
 
@@ -366,44 +342,57 @@ async def predict_route(file: UploadFile = File(...)):
             errors="ignore",
         )
 
-        # Remove the target if the input contains it.
+        # Remove target if supplied in the CSV.
         if "class" in df.columns:
             df.drop(columns=["class"], inplace=True)
 
-        # Match the training feature order.
+        # Match training feature order.
         feature_columns = [
             col
             for col in schema["numerical_columns"]
             if col not in drop_columns
         ]
 
-        # Add missing expected columns.
+        # Add missing expected features.
         for col in feature_columns:
             if col not in df.columns:
                 df[col] = np.nan
 
         df = df[feature_columns]
 
-        # Load the trained model.
+        # Load the saved preprocessing/model wrapper.
         model_path = model_resolver.get_best_model_path()
         model = load_object(model_path)
 
-        # Predict and trace the operation.
+        # Run prediction with metadata-only tracing.
         prediction = run_prediction_with_trace(model, df)
 
+        # Convert numeric target predictions back to labels.
         df["prediction"] = prediction
-
-        # Convert encoded labels to original labels.
         df["prediction"] = df["prediction"].replace(
             TargetValueMapping().reverse_mapping()
         )
 
+        # Use a unique output file for concurrent requests.
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".csv",
+            prefix="aps_prediction_",
+            delete=False,
+            newline="",
+            encoding="utf-8",
+        ) as output_file:
+            output_path = output_file.name
+
         df.to_csv(output_path, index=False)
 
         return FileResponse(
-            output_path,
+            path=output_path,
             filename="prediction_output.csv",
             media_type="text/csv",
+            background=BackgroundTask(
+                lambda: Path(output_path).unlink(missing_ok=True)
+            ),
         )
 
     except HTTPException:
@@ -414,17 +403,17 @@ async def predict_route(file: UploadFile = File(...)):
 
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail=f"Prediction failed: {str(e)}",
         ) from e
 
     finally:
-        # Clean up the uploaded input file.
-        # The output file is retained until the response is sent.
-        try:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-        except OSError:
-            logging.warning("Could not remove temporary input CSV.")
+        await file.close()
+
+        # Delete the output if an error happened before FileResponse
+        # took responsibility for sending and cleaning it up.
+        # Successful responses clean up through BackgroundTask.
+        # FileResponse is returned before this block finishes, so
+        # avoid deleting a successful output here.
 
 
 # =========================================================
@@ -432,9 +421,9 @@ async def predict_route(file: UploadFile = File(...)):
 # =========================================================
 
 if __name__ == "__main__":
-    from uvicorn import run
+    import uvicorn
 
-    run(
+    uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=int(os.getenv("PORT", APP_PORT)),
