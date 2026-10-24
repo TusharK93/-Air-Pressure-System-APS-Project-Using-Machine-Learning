@@ -12,7 +12,7 @@ from sensor.entity.config_entity import (
     ModelEvaluationConfig,
     ModelPusherConfig,
 )
-
+ 
 from sensor.entity.artifact_entity import (
     DataIngestionArtifact,
     DataValidationArtifact,
