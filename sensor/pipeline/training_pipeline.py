@@ -25,12 +25,14 @@ from sensor.entity.artifact_entity import (
 from sensor.exception import SensorException
 from sensor.logger import logging
 
-from sensor.components.data_ingestion import DataIngestion
-from sensor.components.data_validation import DataValidation
-from sensor.components.data_transformation import DataTransformation
-from sensor.components.model_trainer import ModelTrainer
-from sensor.components.model_evaluation import ModelEvaluation
-from sensor.components.model_pusher import ModelPusher
+
+from sensor.component.data_ingestion import DataIngestion
+from sensor.component.data_validation import DataValidation
+from sensor.component.data_transformation import DataTransformation
+from sensor.component.model_trainer import ModelTrainer
+from sensor.component.model_evaluation import ModelEvaluation
+from sensor.component.model_pusher import ModelPusher
+
 
 
 class TrainPipeline:
