@@ -29,7 +29,7 @@ from sensor.logger import logging
 from sensor.component.data_ingestion import DataIngestion
 from sensor.component.data_validation import DataValidation
 from sensor.component.data_transformation import DataTransformation
-from sensor.component.model_trainer import ModelTrainer
+from sensor.component.data_trainer import ModelTrainer
 from sensor.component.model_evaluation import ModelEvaluation
 from sensor.component.model_pusher import ModelPusher
 
