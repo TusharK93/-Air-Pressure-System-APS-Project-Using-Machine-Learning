@@ -59,10 +59,11 @@ def configure_mlflow():
 
         # Automatically record supported scikit-learn training details.
         mlflow.sklearn.autolog(
-            log_models=True,
-            log_input_examples=False,
-            log_model_signatures=True,
-        )
+                  log_models=False,
+                  log_input_examples=False,
+                  log_model_signatures=False,
+                  log_datasets=False,
+             )
 
         MLFLOW_ENABLED = True
         MLFLOW_AUTOLOG_ENABLED = True
