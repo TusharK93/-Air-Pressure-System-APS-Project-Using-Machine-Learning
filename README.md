@@ -319,3 +319,6 @@ No license has been specified in this README. Add a `LICENSE` file to the reposi
 ⭐ If you find this project interesting, consider starring the repository!
 
 **Built with Python, Scikit-learn, XGBoost, Optuna, MLflow, and FastAPI for data-driven predictive maintenance.**
+<p align="center">
+  <img src="aps_failure_prediction_pipeline.gif" alt="APS Failure Prediction end-to-end ML pipeline" width="100%">
+</p
